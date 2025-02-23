@@ -2,11 +2,11 @@
  * app.js (CommonJS)
  * Integrates:
  *  - Cloudinary (image uploads)
- *  - OpenAI (ChatGPT)
+ *  - OpenAI (GPT-4)
  *  - Telegram (send notifications)
  *  - Google Sheets (artists data)
  *  - Google Calendar (appointments)
- *  - Cookie-based session foundation (for conversation memory)
+ *  - Cookie-based session (rolling window conversation)
  ******************************************************/
 
 // 1. Load environment variables
@@ -14,20 +14,20 @@ require('dotenv').config();
 
 // 2. Import required packages
 const express = require('express');
-const cookieParser = require('cookie-parser');   // NEW
-const { v4: uuidv4 } = require('uuid');         // NEW
+const cookieParser = require('cookie-parser');
+const { v4: uuidv4 } = require('uuid');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// 2.1 Create a global sessions map (sessionId -> conversation array)
-const sessions = new Map(); // We'll fill it in next step
+// 2.1 Create a global sessions map (sessionId -> array of messages)
+const sessions = new Map();
 
 // 2.2 Cloudinary + Multer
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// 2.3 OpenAI (version 3.2.1)
+// 2.3 OpenAI (using GPT-4)
 const { Configuration, OpenAIApi } = require('openai');
 
 // 2.4 Telegram Bot
@@ -68,6 +68,16 @@ function sendTelegramMessage(text) {
 app.use(cookieParser());
 app.use(express.json());
 
+// Middleware to ensure each user has a sessionId
+app.use((req, res, next) => {
+  if (!req.cookies.sessionId) {
+    const newId = uuidv4();
+    // Set a sessionId cookie, httpOnly so it's not accessible by JS
+    res.cookie('sessionId', newId, { httpOnly: true });
+  }
+  next();
+});
+
 /******************************************************
  * Cloudinary Configuration
  ******************************************************/
@@ -104,7 +114,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 });
 
 /******************************************************
- * OpenAI Configuration
+ * OpenAI Configuration (GPT-4)
  ******************************************************/
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -112,8 +122,7 @@ const configuration = new Configuration({
 const openai = new OpenAIApi(configuration);
 
 /******************************************************
- * Chat Route (POST /chat)
- * (Currently no conversation memory—just single-turn)
+ * Chat Route (POST /chat) with Rolling Window Memory
  ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
@@ -122,10 +131,15 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No message provided' });
     }
 
-    // For now, single-turn approach:
-    const completion = await openai.createChatCompletion({
-      model: 'gpt-3.5-turbo',
-      messages: [
+    // 1. Identify session
+    const sessionId = req.cookies.sessionId;
+    if (!sessionId) {
+      return res.status(400).json({ error: 'No sessionId cookie found' });
+    }
+
+    // 2. Get or create the conversation array
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, [
         {
           role: 'system',
           content: `You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
@@ -466,15 +480,36 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 
 
 `
-        },
-        {
-          role: 'user',
-          content: userMessage
         }
-      ],
+      ]);
+    }
+
+    const conversation = sessions.get(sessionId);
+
+    // 3. Add user's new message
+    conversation.push({ role: 'user', content: userMessage });
+
+    // 4. Rolling window: Keep system message + last 3 user+assistant pairs
+    const maxPairs = 4;
+    const maxMessages = 1 + (maxPairs * 2); // 1 system + 3 user+assistant pairs = 7
+
+    // If conversation exceeds 7 messages, remove older pairs but keep index 0 (system)
+    while (conversation.length > maxMessages) {
+      conversation.splice(1, 1); 
+    }
+
+    // 5. Call GPT-4 with the final trimmed conversation
+    const completion = await openai.createChatCompletion({
+      model: 'gpt-4o', // GPT-4 model name
+      messages: conversation,
     });
 
     const aiResponse = completion.data.choices[0].message.content;
+
+    // 6. Append assistant response
+    conversation.push({ role: 'assistant', content: aiResponse });
+
+    // 7. Return the AI response
     res.json({ response: aiResponse });
 
   } catch (error) {
