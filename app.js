@@ -7,6 +7,9 @@
  *  - Google Sheets (artists data)
  *  - Google Calendar (appointments)
  *  - Cookie-based session for conversation & data
+ * 
+ * ChatGPT will output "#FORWARD_TELEGRAM#" once the user
+ * is done. We'll detect that token and send a Telegram message.
  ******************************************************/
 
 require('dotenv').config();
@@ -125,6 +128,8 @@ const openai = new OpenAIApi(configuration);
 
 /******************************************************
  * Helper: Build Dynamic System Prompt from sessionData
+ * We instruct GPT that once final approval is given,
+ * it should append "#FORWARD_TELEGRAM#" to its response
  ******************************************************/
 function buildSystemPrompt(data) {
   return `
@@ -472,7 +477,13 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - Gather name, email, phone, date/time once ready.  
 - **Deposit** for tattoos is 50% of the high end.  
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
-- If hesitant, politely help them decide; if not booking, let them go graciously.`;
+- If hesitant, politely help them decide; if not booking, let them go graciously.
+
+**Important**: Once the user has given final approval to send these details to the team, please append the token "#FORWARD_TELEGRAM#" at the end of your message. 
+(This token will not be shown to the user in normal conversation, but it triggers the system to finalize and send details to Telegram.)
+
+Here is the shop info from https://clubtattoo.com/... [Rest of system instructions truncated]
+`;
 }
 
 /******************************************************
@@ -513,7 +524,6 @@ app.post('/chat', async (req, res) => {
 
     /********************************************
      * 1) (Optional) parse userMessage for details
-     *    e.g., naive detection for "my name is..."
      ********************************************/
     if (/my name is/i.test(userMessage)) {
       data.name = userMessage.split('my name is')[1]?.trim() || data.name;
@@ -525,7 +535,6 @@ app.post('/chat', async (req, res) => {
       data.phone = userMessage.split('phone is')[1]?.trim() || data.phone;
     }
     if (/i'm at/i.test(userMessage) || /i am at/i.test(userMessage)) {
-      // naive example: "I'm at Miracle Mile" => parse
       data.location = userMessage.split(/i'?m at|i am at/i)[1]?.trim() || data.location;
     }
     if (/artist is/i.test(userMessage)) {
@@ -549,11 +558,27 @@ app.post('/chat', async (req, res) => {
       conversation.shift(); // remove oldest
     }
 
-    // 4) Check if user is done
-    if (
-      userMessage.toLowerCase().includes('done') ||
-      userMessage.toLowerCase().includes('finalize')
-    ) {
+    // 4) Build dynamic system prompt
+    const systemPrompt = buildSystemPrompt(data);
+
+    // 5) Final array: system + short user/assistant
+    const finalMessages = [
+      { role: 'system', content: systemPrompt },
+      ...conversation
+    ];
+
+    // 6) Call GPT-4
+    const completion = await openai.createChatCompletion({
+      model: 'gpt-4o',
+      messages: finalMessages
+    });
+    const aiResponse = completion.data.choices[0].message.content;
+
+    // 7) Add assistant response
+    conversation.push({ role: 'assistant', content: aiResponse });
+
+    // 8) Check if AI appended "#FORWARD_TELEGRAM#"
+    if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
       // Build summary
       const summary = `
 Booking Summary:
@@ -566,33 +591,15 @@ Price Range: ${data.priceRange}
 Description: ${data.description}
 `;
 
-      // Send to Telegram
       await sendTelegramMessage(summary);
 
-      // Respond to user
+      // We can also remove the token from the final user display if we want:
+      const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
+
       return res.json({
-        response: "Great! I've sent your booking details to our associate on Telegram. We'll be in touch soon!"
+        response: cleanedResponse
       });
     }
-
-    // 5) Build dynamic system prompt
-    const systemPrompt = buildSystemPrompt(data);
-
-    // 6) Final array: system + short user/assistant
-    const finalMessages = [
-      { role: 'system', content: systemPrompt },
-      ...conversation
-    ];
-
-    // 7) Call GPT-4
-    const completion = await openai.createChatCompletion({
-      model: 'gpt-4o',
-      messages: finalMessages
-    });
-    const aiResponse = completion.data.choices[0].message.content;
-
-    // 8) Add assistant response
-    conversation.push({ role: 'assistant', content: aiResponse });
 
     // 9) Return to client
     res.json({ response: aiResponse });
