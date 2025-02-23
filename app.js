@@ -1,14 +1,11 @@
 /******************************************************
  * app.js (CommonJS)
- * Single JSON Memory approach to reduce token usage
- * ChatGPT always includes #DATA snippet each turn
- * If user finalizes, ChatGPT appends "#FORWARD_TELEGRAM#"
- * We remove #DATA and #FORWARD_TELEGRAM# from 
- * user-facing text. 
- *
- * Now with "alreadyGreeted" flag & instructions
- * to not greet again, to merge partial inputs, 
- * and restate plan each time.
+ * Combines:
+ * 1) Single JSON memory for big details (#DATA snippet).
+ * 2) Rolling window of last 2 user–assistant pairs (4 messages).
+ * 
+ * If user finalizes, append "#FORWARD_TELEGRAM#",
+ * we send a Telegram summary from the memory.
  ******************************************************/
 
 require('dotenv').config();
@@ -20,7 +17,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 /******************************************************
- * 1) sessionData map: sessionId -> { memory: "json string" }
+ * 1) sessionData:
+ *    - memory: JSON snippet with "alreadyGreeted", etc.
+ *    - conversation: array of { role: 'user'|'assistant', content: '...' }
  ******************************************************/
 const sessionData = new Map();
 
@@ -32,7 +31,7 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 /******************************************************
- * 3) OpenAI (GPT-4o)
+ * 3) OpenAI (GPT-4)
  ******************************************************/
 const { Configuration, OpenAIApi } = require('openai');
 
@@ -116,7 +115,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 });
 
 /******************************************************
- * 13) OpenAI Config (GPT-4o)
+ * 13) OpenAI Config (GPT-4)
  ******************************************************/
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -125,8 +124,8 @@ const openai = new OpenAIApi(configuration);
 
 /******************************************************
  * 14) Full Original Prompt 
- * Add instructions about "alreadyGreeted", partial merges, 
- * restating plan, etc.
+ *   (Include your entire instructions about 
+ *    behind-the-scenes logic, staff, etc.)
  ******************************************************/
 const baseSystemPrompt = `
 You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
@@ -455,8 +454,7 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 
 ### **Your Role**
 
-- **Never** mention cost per square inch or numeric scales. 
-- **Never* mention the total amount of discount you can give.  
+- **Never** mention cost per square inch or numeric scales.  
 - **Be friendly** and professional, focusing on **closing the sale**.  
 - **Confirm** the client’s chosen location.  
 - For tattoos: if it’s a big piece or portrait, use session-based (\$1600–\$2200). Otherwise, use references or formula +10%. If it’s **full color near-realism**, **double** the final estimate.  
@@ -465,6 +463,9 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - **Deposit** for tattoos is 50% of the high end.  
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
 - If hesitant, politely help them decide; if not booking, let them go graciously.
+
+
+
 IMPORTANT:
 1. You must ALWAYS produce a #DATA snippet in your assistant message, 
    even if no new info was discovered. If there's no new info, 
@@ -499,13 +500,14 @@ IMPORTANT:
    merge it into the relevant field in #DATA (like "description").
 
 8. Always restate the combined plan in your next answer 
-   (without re-greeting if "alreadyGreeted" is true).
+   (without re-greeting if "alreadyGreeted" is true)..
 `;
 
 /******************************************************
  * 15) Build System Prompt with memory
  ******************************************************/
 function buildSystemPrompt(currentMemory) {
+  // If we have no memory, use default
   const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`;
   return `
 ${baseSystemPrompt}
@@ -516,8 +518,8 @@ ${safeMemory}
 }
 
 /******************************************************
- * 16) Chat Route (POST /chat) 
- * Single JSON memory approach
+ * 16) Chat Route (POST /chat)
+ * Single JSON memory + Rolling window (2 user–assistant pairs)
  ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
@@ -531,34 +533,51 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No sessionId cookie found' });
     }
 
-    // If no memory, init
+    // If no session record, init
     if (!sessionData.has(sessionId)) {
-      // We include "alreadyGreeted" in the default
       sessionData.set(sessionId, {
-        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`
+        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`,
+        conversation: [] // will store { role: 'user'|'assistant', content: '...' }
       });
     }
 
     const dataObj = sessionData.get(sessionId);
     const currentMemory = dataObj.memory;
+    const conversation = dataObj.conversation;
 
-    // 1) Build system prompt
+    // 1) Add user's message to conversation
+    conversation.push({ role: 'user', content: userMessage });
+
+    // 2) Keep only last 4 messages (2 user–assistant pairs)
+    while (conversation.length > 4) {
+      conversation.shift();
+    }
+
+    // 3) Build system prompt with memory
     const systemPrompt = buildSystemPrompt(currentMemory);
 
-    // 2) finalMessages: system + user
+    // 4) finalMessages: system + the short conversation
     const finalMessages = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage }
+      ...conversation
     ];
 
-    // 3) Call GPT-4o
+    // 5) Call GPT-4
     const completion = await openai.createChatCompletion({
-      model: 'gpt-4o',
+      model: 'gpt-4',
       messages: finalMessages
     });
     let aiResponse = completion.data.choices[0].message.content;
 
-    // 4) Extract #DATA snippet
+    // 6) Add assistant reply to conversation
+    conversation.push({ role: 'assistant', content: aiResponse });
+
+    // Trim again if needed
+    while (conversation.length > 4) {
+      conversation.shift();
+    }
+
+    // 7) Extract #DATA snippet
     const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA/;
     const match = dataRegex.exec(aiResponse);
     if (match) {
@@ -571,10 +590,10 @@ app.post('/chat', async (req, res) => {
       }
     }
 
-    // 5) Remove #DATA snippet from user-facing text
+    // Remove the #DATA snippet from user-facing text
     aiResponse = aiResponse.replace(dataRegex, '').trim();
 
-    // 6) Check for #FORWARD_TELEGRAM#
+    // 8) Check for #FORWARD_TELEGRAM#
     if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
       const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
       try {
@@ -599,7 +618,7 @@ Description: ${parsed.description || ""}
       }
     }
 
-    // 7) Return final text
+    // 9) Return final text to user
     res.json({ response: aiResponse });
 
   } catch (error) {
