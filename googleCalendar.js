@@ -11,7 +11,7 @@ const calendarCredentials = JSON.parse(process.env.GOOGLE_CALENDAR_KEY);
 
 // 2) The Calendar ID from "Integrate calendar" in Google Calendar settings
 //    Might look like "myname@gmail.com" or "abc123@group.calendar.google.com"
-const CALENDAR_ID = 'YOUR_CALENDAR_ID_HERE';
+const CALENDAR_ID = '923f47b5d061d96f102e6fdced3bd83ec55922a0f791d135e6e06a52b1730329@group.calendar.google.com';
 
 // 3) Create a GoogleAuth instance with credentials
 const auth = new google.auth.GoogleAuth({
