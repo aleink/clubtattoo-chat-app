@@ -2,84 +2,86 @@
  * app.js (CommonJS)
  * Integrates:
  *  - Cloudinary (image uploads)
- *  - OpenAI (GPT-4)
+ *  - OpenAI (GPT-4) with rolling window memory
  *  - Telegram (send notifications)
  *  - Google Sheets (artists data)
  *  - Google Calendar (appointments)
- *  - Cookie-based session (rolling window conversation)
+ *  - Cookie-based session for conversation & data
  ******************************************************/
 
-// 1. Load environment variables
 require('dotenv').config();
-
-// 2. Import required packages
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// 2.1 Create a global sessions map (sessionId -> array of messages)
-const sessions = new Map();
+/******************************************************
+ * 1) Global Maps for conversation & structured data
+ ******************************************************/
+const sessions = new Map();   // sessionId -> array of {role, content} for user/assistant
+const sessionData = new Map(); // sessionId -> { name, email, phone, location, artist, priceRange, description }
 
-// 2.2 Cloudinary + Multer
+/******************************************************
+ * 2) Cloudinary + Multer
+ ******************************************************/
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// 2.3 OpenAI (using GPT-4)
+/******************************************************
+ * 3) OpenAI (GPT-4)
+ ******************************************************/
 const { Configuration, OpenAIApi } = require('openai');
 
-// 2.4 Telegram Bot
+/******************************************************
+ * 4) Telegram Bot
+ ******************************************************/
 const TelegramBot = require('node-telegram-bot-api');
 
-// 2.5 Path for serving static files
-const path = require('path');
-
-// Serve the `public` folder (where index.html is located)
-app.use(express.static(path.join(__dirname, 'public')));
-
 /******************************************************
- * Google Sheets helper (for artists data)
+ * 5) Google Sheets & Calendar Helpers
  ******************************************************/
 const { getArtistsData } = require('./googleSheets');
-
-/******************************************************
- * Google Calendar helper (for appointments)
- ******************************************************/
 const { createEvent, listEvents } = require('./googleCalendar');
 
 /******************************************************
- * Telegram Bot Setup
+ * 6) Telegram Bot Setup
  ******************************************************/
-const telegramToken = process.env.TELEGRAM_BOT_TOKEN;  // from .env
-const telegramChatId = process.env.TELEGRAM_CHAT_ID;   // from .env
+const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 const telegramBot = new TelegramBot(telegramToken, { polling: false });
 
-// Helper function to send a message to your Telegram chat
 function sendTelegramMessage(text) {
   return telegramBot.sendMessage(telegramChatId, text);
 }
 
 /******************************************************
- * Express Middleware
+ * 7) Express & Static Files
  ******************************************************/
-// Use cookie-parser BEFORE express.json to parse cookies
+app.use(express.static(path.join(__dirname, 'public')));
+
+/******************************************************
+ * 8) Cookie Parser & JSON
+ ******************************************************/
 app.use(cookieParser());
 app.use(express.json());
 
-// Middleware to ensure each user has a sessionId
+/******************************************************
+ * 9) Session ID Middleware
+ ******************************************************/
 app.use((req, res, next) => {
   if (!req.cookies.sessionId) {
     const newId = uuidv4();
-    // Set a sessionId cookie, httpOnly so it's not accessible by JS
+    // httpOnly: true so it’s not accessible via JS in the browser
     res.cookie('sessionId', newId, { httpOnly: true });
   }
   next();
 });
 
 /******************************************************
- * Cloudinary Configuration
+ * 10) Cloudinary Config
  ******************************************************/
 cloudinary.config({
   cloud_name: 'dbqmkwkga',
@@ -97,14 +99,14 @@ const storage = new CloudinaryStorage({
 const upload = multer({ storage });
 
 /******************************************************
- * Root Route (Commented Out to allow index.html)
+ * 11) Root Route (Commented Out to serve index.html)
  ******************************************************/
 // app.get('/', (req, res) => {
 //   res.send('Hello from Club Tattoo Chat App!');
 // });
 
 /******************************************************
- * Image Upload Route (POST /upload)
+ * 12) Image Upload Route (POST /upload)
  ******************************************************/
 app.post('/upload', upload.single('image'), (req, res) => {
   if (!req.file) {
@@ -114,7 +116,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 });
 
 /******************************************************
- * OpenAI Configuration (GPT-4)
+ * 13) OpenAI Config (GPT-4)
  ******************************************************/
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -122,27 +124,21 @@ const configuration = new Configuration({
 const openai = new OpenAIApi(configuration);
 
 /******************************************************
- * Chat Route (POST /chat) with Rolling Window Memory
+ * Helper: Build Dynamic System Prompt from sessionData
  ******************************************************/
-app.post('/chat', async (req, res) => {
-  try {
-    const userMessage = req.body.message;
-    if (!userMessage) {
-      return res.status(400).json({ error: 'No message provided' });
-    }
+function buildSystemPrompt(data) {
+  return `
+You are Aitana, a booking manager at Club Tattoo, with multiple locations.
+Here are the user's known details:
+- Name: ${data.name || "N/A"}
+- Email: ${data.email || "N/A"}
+- Phone: ${data.phone || "N/A"}
+- Location: ${data.location || "N/A"}
+- Artist: ${data.artist || "N/A"}
+- Price Range: ${data.priceRange || "N/A"}
+- Tattoo Description: ${data.description || "N/A"}
 
-    // 1. Identify session
-    const sessionId = req.cookies.sessionId;
-    if (!sessionId) {
-      return res.status(400).json({ error: 'No sessionId cookie found' });
-    }
-
-    // 2. Get or create the conversation array
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, [
-        {
-          role: 'system',
-          content: `You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
+Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
 **Club Tattoo Locations**:
 1. **Mesa, AZ** – 1205 W. Broadway Rd, Mesa, AZ 85202 (480) 835-8000
@@ -476,40 +472,129 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - Gather name, email, phone, date/time once ready.  
 - **Deposit** for tattoos is 50% of the high end.  
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
-- If hesitant, politely help them decide; if not booking, let them go graciously.
+- If hesitant, politely help them decide; if not booking, let them go graciously.`;
+}
 
+/******************************************************
+ * 14) Chat Route (POST /chat) with Rolling Window & Data
+ ******************************************************/
+app.post('/chat', async (req, res) => {
+  try {
+    const userMessage = req.body.message;
+    if (!userMessage) {
+      return res.status(400).json({ error: 'No message provided' });
+    }
 
-`
-        }
-      ]);
+    // Identify session
+    const sessionId = req.cookies.sessionId;
+    if (!sessionId) {
+      return res.status(400).json({ error: 'No sessionId cookie found' });
+    }
+
+    // If no conversation yet, init an empty array
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, []);
+    }
+    // If no data yet, init
+    if (!sessionData.has(sessionId)) {
+      sessionData.set(sessionId, {
+        name: '',
+        email: '',
+        phone: '',
+        location: '',
+        artist: '',
+        priceRange: '',
+        description: ''
+      });
     }
 
     const conversation = sessions.get(sessionId);
+    const data = sessionData.get(sessionId);
 
-    // 3. Add user's new message
-    conversation.push({ role: 'user', content: userMessage });
-
-    // 4. Rolling window: Keep system message + last 3 user+assistant pairs
-    const maxPairs = 4;
-    const maxMessages = 1 + (maxPairs * 2); // 1 system + 3 user+assistant pairs = 7
-
-    // If conversation exceeds 7 messages, remove older pairs but keep index 0 (system)
-    while (conversation.length > maxMessages) {
-      conversation.splice(1, 1); 
+    /********************************************
+     * 1) (Optional) parse userMessage for details
+     *    e.g., naive detection for "my name is..."
+     ********************************************/
+    if (/my name is/i.test(userMessage)) {
+      data.name = userMessage.split('my name is')[1]?.trim() || data.name;
+    }
+    if (/email is/i.test(userMessage)) {
+      data.email = userMessage.split('email is')[1]?.trim() || data.email;
+    }
+    if (/phone is/i.test(userMessage)) {
+      data.phone = userMessage.split('phone is')[1]?.trim() || data.phone;
+    }
+    if (/i'm at/i.test(userMessage) || /i am at/i.test(userMessage)) {
+      // naive example: "I'm at Miracle Mile" => parse
+      data.location = userMessage.split(/i'?m at|i am at/i)[1]?.trim() || data.location;
+    }
+    if (/artist is/i.test(userMessage)) {
+      data.artist = userMessage.split('artist is')[1]?.trim() || data.artist;
+    }
+    if (/price range is/i.test(userMessage)) {
+      data.priceRange = userMessage.split('price range is')[1]?.trim() || data.priceRange;
+    }
+    if (/description is/i.test(userMessage)) {
+      data.description = userMessage.split('description is')[1]?.trim() || data.description;
     }
 
-    // 5. Call GPT-4 with the final trimmed conversation
-    const completion = await openai.createChatCompletion({
-      model: 'gpt-4o', // GPT-4 model name
-      messages: conversation,
-    });
+    // 2) Add user's message to conversation
+    conversation.push({ role: 'user', content: userMessage });
 
+    // 3) Rolling window for user+assistant
+    // We'll keep max 6 messages (3 pairs)
+    const maxPairs = 4;
+    const maxMessages = maxPairs * 2; 
+    while (conversation.length > maxMessages) {
+      conversation.shift(); // remove oldest
+    }
+
+    // 4) Check if user is done
+    if (
+      userMessage.toLowerCase().includes('done') ||
+      userMessage.toLowerCase().includes('finalize')
+    ) {
+      // Build summary
+      const summary = `
+Booking Summary:
+Name: ${data.name}
+Email: ${data.email}
+Phone: ${data.phone}
+Location: ${data.location}
+Artist: ${data.artist}
+Price Range: ${data.priceRange}
+Description: ${data.description}
+`;
+
+      // Send to Telegram
+      await sendTelegramMessage(summary);
+
+      // Respond to user
+      return res.json({
+        response: "Great! I've sent your booking details to our associate on Telegram. We'll be in touch soon!"
+      });
+    }
+
+    // 5) Build dynamic system prompt
+    const systemPrompt = buildSystemPrompt(data);
+
+    // 6) Final array: system + short user/assistant
+    const finalMessages = [
+      { role: 'system', content: systemPrompt },
+      ...conversation
+    ];
+
+    // 7) Call GPT-4
+    const completion = await openai.createChatCompletion({
+      model: 'gpt-4o',
+      messages: finalMessages
+    });
     const aiResponse = completion.data.choices[0].message.content;
 
-    // 6. Append assistant response
+    // 8) Add assistant response
     conversation.push({ role: 'assistant', content: aiResponse });
 
-    // 7. Return the AI response
+    // 9) Return to client
     res.json({ response: aiResponse });
 
   } catch (error) {
@@ -519,7 +604,7 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 });
 
 /******************************************************
- * Telegram Test Route (POST /send-telegram)
+ * 15) Telegram Test Route (POST /send-telegram)
  ******************************************************/
 app.post('/send-telegram', (req, res) => {
   const { text } = req.body;
@@ -538,7 +623,7 @@ app.post('/send-telegram', (req, res) => {
 });
 
 /******************************************************
- * Google Sheets Route (GET /artists)
+ * 16) Google Sheets Route (GET /artists)
  ******************************************************/
 app.get('/artists', async (req, res) => {
   try {
@@ -551,9 +636,9 @@ app.get('/artists', async (req, res) => {
 });
 
 /******************************************************
- * Google Calendar Routes
+ * 17) Google Calendar Routes
  ******************************************************/
-// 1) Create a new event (POST /calendar/events)
+// Create a new event (POST /calendar/events)
 app.post('/calendar/events', async (req, res) => {
   try {
     const { summary, description, startTime, endTime } = req.body;
@@ -569,7 +654,7 @@ app.post('/calendar/events', async (req, res) => {
   }
 });
 
-// 2) List upcoming events (GET /calendar/events)
+// List upcoming events (GET /calendar/events)
 app.get('/calendar/events', async (req, res) => {
   try {
     const events = await listEvents();
@@ -581,7 +666,7 @@ app.get('/calendar/events', async (req, res) => {
 });
 
 /******************************************************
- * Start the Server
+ * 18) Start the Server
  ******************************************************/
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
