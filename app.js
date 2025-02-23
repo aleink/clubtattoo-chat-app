@@ -2,14 +2,15 @@
  * app.js (CommonJS)
  * Integrates:
  *  - Cloudinary (image uploads)
- *  - OpenAI (GPT-4) with rolling window memory
+ *  - OpenAI (GPT-4o) with rolling window memory
  *  - Telegram (send notifications)
  *  - Google Sheets (artists data)
  *  - Google Calendar (appointments)
  *  - Cookie-based session for conversation & data
  * 
- * ChatGPT will output "#FORWARD_TELEGRAM#" once the user
- * is done. We'll detect that token and send a Telegram message.
+ * ChatGPT autonomously extracts user details by 
+ * outputting a #DATA: { ... } #ENDDATA snippet in 
+ * each assistant reply. We parse it.
  ******************************************************/
 
 require('dotenv').config();
@@ -23,7 +24,7 @@ const port = process.env.PORT || 3000;
 /******************************************************
  * 1) Global Maps for conversation & structured data
  ******************************************************/
-const sessions = new Map();   // sessionId -> array of {role, content} for user/assistant
+const sessions = new Map();   // sessionId -> array of {role, content}
 const sessionData = new Map(); // sessionId -> { name, email, phone, location, artist, priceRange, description }
 
 /******************************************************
@@ -34,7 +35,7 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 /******************************************************
- * 3) OpenAI (GPT-4)
+ * 3) OpenAI (GPT-4o)
  ******************************************************/
 const { Configuration, OpenAIApi } = require('openai');
 
@@ -77,7 +78,6 @@ app.use(express.json());
 app.use((req, res, next) => {
   if (!req.cookies.sessionId) {
     const newId = uuidv4();
-    // httpOnly: true so it’s not accessible via JS in the browser
     res.cookie('sessionId', newId, { httpOnly: true });
   }
   next();
@@ -119,7 +119,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 });
 
 /******************************************************
- * 13) OpenAI Config (GPT-4)
+ * 13) OpenAI Config (GPT-4o)
  ******************************************************/
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
@@ -127,21 +127,40 @@ const configuration = new Configuration({
 const openai = new OpenAIApi(configuration);
 
 /******************************************************
- * Helper: Build Dynamic System Prompt from sessionData
- * We instruct GPT that once final approval is given,
- * it should append "#FORWARD_TELEGRAM#" to its response
+ * Helper: Build Dynamic System Prompt
+ * Instruct ChatGPT to produce #DATA snippet & #FORWARD_TELEGRAM#
  ******************************************************/
 function buildSystemPrompt(data) {
   return `
 You are Aitana, a booking manager at Club Tattoo, with multiple locations.
-Here are the user's known details:
-- Name: ${data.name || "N/A"}
-- Email: ${data.email || "N/A"}
-- Phone: ${data.phone || "N/A"}
-- Location: ${data.location || "N/A"}
-- Artist: ${data.artist || "N/A"}
-- Price Range: ${data.priceRange || "N/A"}
-- Tattoo Description: ${data.description || "N/A"}
+
+You must:
+1. Engage in a warm, human-like conversation about tattoos/piercings.
+2. Autonomously extract user details (name, email, phone, location, artist, priceRange, description) and include them in a JSON snippet:
+   #DATA:
+   {
+     "name": "${data.name || ""}",
+     "email": "${data.email || ""}",
+     "phone": "${data.phone || ""}",
+     "location": "${data.location || ""}",
+     "artist": "${data.artist || ""}",
+     "priceRange": "${data.priceRange || ""}",
+     "description": "${data.description || ""}"
+   }
+   #ENDDATA
+   whenever you learn new info or want to update the known details. 
+   This snippet must appear in your assistant message whenever there's a change.
+3. Once the user fully approves sending details to the team, append "#FORWARD_TELEGRAM#" at the end of your message.
+4. Never reveal numeric formulas or internal logic.
+
+Here are the user's known details so far:
+Name: ${data.name || "N/A"}
+Email: ${data.email || "N/A"}
+Phone: ${data.phone || "N/A"}
+Location: ${data.location || "N/A"}
+Artist: ${data.artist || "N/A"}
+Price Range: ${data.priceRange || "N/A"}
+Description: ${data.description || "N/A"}
 
 Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
@@ -478,16 +497,11 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - **Deposit** for tattoos is 50% of the high end.  
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
 - If hesitant, politely help them decide; if not booking, let them go graciously.
-
-**Important**: Once the user has given final approval to send these details to the team, please append the token "#FORWARD_TELEGRAM#" at the end of your message. 
-(This token will not be shown to the user in normal conversation, but it triggers the system to finalize and send details to Telegram.)
-
-Here is the shop info from https://clubtattoo.com/... [Rest of system instructions truncated]
 `;
 }
 
 /******************************************************
- * 14) Chat Route (POST /chat) with Rolling Window & Data
+ * 14) Chat Route (POST /chat) with Rolling Window & GPT JSON parsing
  ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
@@ -502,7 +516,7 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No sessionId cookie found' });
     }
 
-    // If no conversation yet, init an empty array
+    // If no conversation yet, init
     if (!sessions.has(sessionId)) {
       sessions.set(sessionId, []);
     }
@@ -522,62 +536,71 @@ app.post('/chat', async (req, res) => {
     const conversation = sessions.get(sessionId);
     const data = sessionData.get(sessionId);
 
-    /********************************************
-     * 1) (Optional) parse userMessage for details
-     ********************************************/
-    if (/my name is/i.test(userMessage)) {
-      data.name = userMessage.split('my name is')[1]?.trim() || data.name;
-    }
-    if (/email is/i.test(userMessage)) {
-      data.email = userMessage.split('email is')[1]?.trim() || data.email;
-    }
-    if (/phone is/i.test(userMessage)) {
-      data.phone = userMessage.split('phone is')[1]?.trim() || data.phone;
-    }
-    if (/i'm at/i.test(userMessage) || /i am at/i.test(userMessage)) {
-      data.location = userMessage.split(/i'?m at|i am at/i)[1]?.trim() || data.location;
-    }
-    if (/artist is/i.test(userMessage)) {
-      data.artist = userMessage.split('artist is')[1]?.trim() || data.artist;
-    }
-    if (/price range is/i.test(userMessage)) {
-      data.priceRange = userMessage.split('price range is')[1]?.trim() || data.priceRange;
-    }
-    if (/description is/i.test(userMessage)) {
-      data.description = userMessage.split('description is')[1]?.trim() || data.description;
-    }
-
-    // 2) Add user's message to conversation
+    // 1) Add user's message to conversation
     conversation.push({ role: 'user', content: userMessage });
 
-    // 3) Rolling window for user+assistant
-    // We'll keep max 6 messages (3 pairs)
-    const maxPairs = 4;
+    // 2) Rolling window for user+assistant (max 3 pairs => 6 messages)
+    const maxPairs = 3;
     const maxMessages = maxPairs * 2; 
     while (conversation.length > maxMessages) {
-      conversation.shift(); // remove oldest
+      conversation.shift();
     }
 
-    // 4) Build dynamic system prompt
+    // 3) Build system prompt
     const systemPrompt = buildSystemPrompt(data);
 
-    // 5) Final array: system + short user/assistant
+    // 4) Final messages array
     const finalMessages = [
       { role: 'system', content: systemPrompt },
       ...conversation
     ];
 
-    // 6) Call GPT-4
+    // 5) Call GPT-4o
     const completion = await openai.createChatCompletion({
-      model: 'gpt-4o',
+      model: 'gpt-4o', // The custom model name you mentioned
       messages: finalMessages
     });
     const aiResponse = completion.data.choices[0].message.content;
 
-    // 7) Add assistant response
+    // 6) Add assistant message
     conversation.push({ role: 'assistant', content: aiResponse });
 
-    // 8) Check if AI appended "#FORWARD_TELEGRAM#"
+    /******************************************************
+     * 7) Extract #DATA JSON snippet if present
+     ******************************************************/
+    // We'll look for something like:
+    // #DATA:
+    // {
+    //   "name": "xxx",
+    //   ...
+    // }
+    // #ENDDATA
+    // Use a regex to capture that block
+
+    const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA/g;
+    let match;
+    while ((match = dataRegex.exec(aiResponse)) !== null) {
+      try {
+        const jsonStr = match[1];
+        const parsed = JSON.parse(jsonStr);
+
+        // Update sessionData
+        if (parsed.name) data.name = parsed.name;
+        if (parsed.email) data.email = parsed.email;
+        if (parsed.phone) data.phone = parsed.phone;
+        if (parsed.location) data.location = parsed.location;
+        if (parsed.artist) data.artist = parsed.artist;
+        if (parsed.priceRange) data.priceRange = parsed.priceRange;
+        if (parsed.description) data.description = parsed.description;
+
+      } catch (err) {
+        console.error('Error parsing #DATA JSON:', err);
+      }
+    }
+
+    /******************************************************
+     * 8) Check if AI appended "#FORWARD_TELEGRAM#"
+     ******************************************************/
     if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
       // Build summary
       const summary = `
@@ -593,7 +616,7 @@ Description: ${data.description}
 
       await sendTelegramMessage(summary);
 
-      // We can also remove the token from the final user display if we want:
+      // Remove token from final display
       const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
 
       return res.json({
