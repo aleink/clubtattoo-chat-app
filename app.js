@@ -6,6 +6,7 @@
  *  - Telegram (send notifications)
  *  - Google Sheets (artists data)
  *  - Google Calendar (appointments)
+ *  - Cookie-based session foundation (for conversation memory)
  ******************************************************/
 
 // 1. Load environment variables
@@ -13,30 +14,39 @@ require('dotenv').config();
 
 // 2. Import required packages
 const express = require('express');
+const cookieParser = require('cookie-parser');   // NEW
+const { v4: uuidv4 } = require('uuid');         // NEW
 const app = express();
 const port = process.env.PORT || 3000;
 
-// 2.1 Cloudinary + Multer
+// 2.1 Create a global sessions map (sessionId -> conversation array)
+const sessions = new Map(); // We'll fill it in next step
+
+// 2.2 Cloudinary + Multer
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// 2.2 OpenAI (version 3.2.1)
+// 2.3 OpenAI (version 3.2.1)
 const { Configuration, OpenAIApi } = require('openai');
 
-// 2.3 Telegram Bot
+// 2.4 Telegram Bot
 const TelegramBot = require('node-telegram-bot-api');
 
-// 2.4 Path for serving static files
+// 2.5 Path for serving static files
 const path = require('path');
 
 // Serve the `public` folder (where index.html is located)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 2.5 Google Sheets helper (for artists data)
+/******************************************************
+ * Google Sheets helper (for artists data)
+ ******************************************************/
 const { getArtistsData } = require('./googleSheets');
 
-// 2.6 Google Calendar helper (for appointments)
+/******************************************************
+ * Google Calendar helper (for appointments)
+ ******************************************************/
 const { createEvent, listEvents } = require('./googleCalendar');
 
 /******************************************************
@@ -54,6 +64,8 @@ function sendTelegramMessage(text) {
 /******************************************************
  * Express Middleware
  ******************************************************/
+// Use cookie-parser BEFORE express.json to parse cookies
+app.use(cookieParser());
 app.use(express.json());
 
 /******************************************************
@@ -82,7 +94,7 @@ const upload = multer({ storage });
 // });
 
 /******************************************************
- * Image Upload Route
+ * Image Upload Route (POST /upload)
  ******************************************************/
 app.post('/upload', upload.single('image'), (req, res) => {
   if (!req.file) {
@@ -101,6 +113,7 @@ const openai = new OpenAIApi(configuration);
 
 /******************************************************
  * Chat Route (POST /chat)
+ * (Currently no conversation memory—just single-turn)
  ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
@@ -109,9 +122,9 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No message provided' });
     }
 
-    // Create a chat completion request
+    // For now, single-turn approach:
     const completion = await openai.createChatCompletion({
-      model: 'gpt-3.5-turbo',  // or 'gpt-4' if you have access
+      model: 'gpt-3.5-turbo',
       messages: [
         {
           role: 'system',
@@ -452,8 +465,7 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - If hesitant, politely help them decide; if not booking, let them go graciously.
 
 
-
-          `
+`
         },
         {
           role: 'user',
@@ -462,7 +474,6 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
       ],
     });
 
-    // Extract the AI's response
     const aiResponse = completion.data.choices[0].message.content;
     res.json({ response: aiResponse });
 
