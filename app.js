@@ -27,16 +27,16 @@ const { Configuration, OpenAIApi } = require('openai');
 // 2.3 Telegram Bot
 const TelegramBot = require('node-telegram-bot-api');
 
+// 2.4 Path for serving static files
 const path = require('path');
 
-// after creating your Express app
+// Serve the `public` folder (where index.html is located)
 app.use(express.static(path.join(__dirname, 'public')));
 
-
-// 2.4 Google Sheets helper (for artists data)
+// 2.5 Google Sheets helper (for artists data)
 const { getArtistsData } = require('./googleSheets');
 
-// 2.5 Google Calendar helper (for appointments)
+// 2.6 Google Calendar helper (for appointments)
 const { createEvent, listEvents } = require('./googleCalendar');
 
 /******************************************************
@@ -60,8 +60,8 @@ app.use(express.json());
  * Cloudinary Configuration
  ******************************************************/
 cloudinary.config({
-  cloud_name: 'dbqmkwkga',         // Example placeholders
-  api_key: '857572131317818',     // Replace with your actual keys
+  cloud_name: 'dbqmkwkga',
+  api_key: '857572131317818',
   api_secret: 'j6_kZeCiVlj9PTBz5Q4h7DNRBSc'
 });
 
@@ -74,6 +74,12 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 
+/******************************************************
+ * Root Route (Commented Out to allow index.html)
+ ******************************************************/
+// app.get('/', (req, res) => {
+//   res.send('Hello from Club Tattoo Chat App!');
+// });
 
 /******************************************************
  * Image Upload Route
@@ -89,7 +95,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
  * OpenAI Configuration
  ******************************************************/
 const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY, // from .env
+  apiKey: process.env.OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
 
@@ -109,7 +115,7 @@ app.post('/chat', async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
+          content: `You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
 **Club Tattoo Locations**:
 1. **Mesa, AZ** – 1205 W. Broadway Rd, Mesa, AZ 85202 (480) 835-8000
@@ -447,6 +453,7 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 
 
 
+          `
         },
         {
           role: 'user',
@@ -469,7 +476,6 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
  * Telegram Test Route (POST /send-telegram)
  ******************************************************/
 app.post('/send-telegram', (req, res) => {
-  // Expecting { "text": "Hello from Club Tattoo" }
   const { text } = req.body;
   if (!text) {
     return res.status(400).json({ error: 'text is required' });
@@ -501,10 +507,7 @@ app.get('/artists', async (req, res) => {
 /******************************************************
  * Google Calendar Routes
  ******************************************************/
-
-// 1) Create a new event
-// POST /calendar/events
-// Body: { "summary":"Tattoo with Tony", "description":"Full sleeve", "startTime":"2025-03-10T14:00:00-07:00", "endTime":"2025-03-10T16:00:00-07:00" }
+// 1) Create a new event (POST /calendar/events)
 app.post('/calendar/events', async (req, res) => {
   try {
     const { summary, description, startTime, endTime } = req.body;
@@ -520,8 +523,7 @@ app.post('/calendar/events', async (req, res) => {
   }
 });
 
-// 2) List upcoming events
-// GET /calendar/events
+// 2) List upcoming events (GET /calendar/events)
 app.get('/calendar/events', async (req, res) => {
   try {
     const events = await listEvents();
@@ -536,5 +538,5 @@ app.get('/calendar/events', async (req, res) => {
  * Start the Server
  ******************************************************/
 app.listen(port, () => {
-  console.log(Server is running on http://localhost:${port});
+  console.log(`Server is running on http://localhost:${port}`);
 });
