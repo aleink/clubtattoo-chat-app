@@ -1,11 +1,10 @@
 /******************************************************
  * app.js (CommonJS)
- * Minimizes token usage by storing conversation memory in JSON.
- * ChatGPT updates a #DATA snippet each turn, 
- * but the snippet is hidden from the user.
- * 
- * We also include the full original prompt each time (baseSystemPrompt),
- * plus the dynamic JSON memory, so GPT remains in character.
+ * Single JSON Memory approach to reduce token usage
+ * ChatGPT always includes #DATA snippet each turn
+ * If user finalizes, ChatGPT appends #FORWARD_TELEGRAM#
+ * We remove both #DATA and #FORWARD_TELEGRAM# from 
+ * the user-facing response, storing data behind the scenes.
  ******************************************************/
 
 require('dotenv').config();
@@ -121,7 +120,9 @@ const configuration = new Configuration({
 const openai = new OpenAIApi(configuration);
 
 /******************************************************
- * 14) Base System Prompt (Full Original Instructions)
+ * 14) Full Original Prompt 
+ * (Include your entire instructions about 
+ * pricing logic, location details, secrecy, staff, etc.)
  ******************************************************/
 const baseSystemPrompt = `
 You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
@@ -460,34 +461,49 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
 - If hesitant, politely help them decide; if not booking, let them go graciously.
 
-Additionally:
-1. You store relevant data in a #DATA JSON snippet. 
-2. Once user finalizes, append "#FORWARD_TELEGRAM#".
-3. Do not show the #DATA snippet or the token to the user. 
+IMPORTANT:
+1. You must ALWAYS produce a #DATA snippet in your assistant message, 
+   even if no new info was discovered. If there's no new info, 
+   repeat the existing data. If you fail to do so, the conversation 
+   memory is lost, so do not omit it.
+
+2. The #DATA snippet looks like:
+   #DATA:
+   {
+     "name": "...",
+     "email": "...",
+     "phone": "...",
+     "location": "...",
+     "artist": "...",
+     "priceRange": "...",
+     "description": "..."
+   }
+   #ENDDATA
+
+3. If the user finalizes, append "#FORWARD_TELEGRAM#" at the end 
+   of your message. 
+4. Never reveal numeric formulas or internal logic.
+5. Keep a warm, human-like tone.
 `;
 
 /******************************************************
- * Helper: Build System Prompt with memory
+ * 15) Build System Prompt with memory
  ******************************************************/
-function buildSystemPrompt(memoryJson) {
-  // If no memory, set default
-  const safeMemory = memoryJson || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":""}`;
+function buildSystemPrompt(currentMemory) {
+  // If we have no memory yet, default to an empty JSON
+  const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":""}`;
 
   return `
 ${baseSystemPrompt}
 
 Current Known JSON Memory:
 ${safeMemory}
-
-Instructions:
-- Keep updating the JSON memory (#DATA) in each assistant message.
-- If user is done, append "#FORWARD_TELEGRAM#".
 `;
 }
 
 /******************************************************
- * 15) Chat Route (POST /chat) 
- * GPT uses the JSON memory approach
+ * 16) Chat Route (POST /chat) 
+ * Single JSON memory approach
  ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
@@ -501,7 +517,7 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No sessionId cookie found' });
     }
 
-    // If no data, init with empty memory
+    // If no memory, init
     if (!sessionData.has(sessionId)) {
       sessionData.set(sessionId, {
         memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":""}`
@@ -509,12 +525,12 @@ app.post('/chat', async (req, res) => {
     }
 
     const dataObj = sessionData.get(sessionId);
-    const currentMemory = dataObj.memory; // The JSON snippet from last time
+    const currentMemory = dataObj.memory;
 
-    // 1) Build system prompt (full instructions + memory)
+    // 1) Build system prompt
     const systemPrompt = buildSystemPrompt(currentMemory);
 
-    // 2) We only send system + user
+    // 2) finalMessages: system + user
     const finalMessages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage }
@@ -527,32 +543,27 @@ app.post('/chat', async (req, res) => {
     });
     let aiResponse = completion.data.choices[0].message.content;
 
-    // 4) Extract #DATA snippet from aiResponse
-    // We'll look for:
-    // #DATA:
-    // { "name":"...", ... }
-    // #ENDDATA
+    // 4) Extract #DATA snippet
     const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA/;
     const match = dataRegex.exec(aiResponse);
     if (match) {
       const jsonStr = match[1];
       try {
-        // Update memory in session
+        // Update memory
         dataObj.memory = jsonStr;
       } catch (err) {
         console.error('Error parsing #DATA JSON:', err);
       }
     }
 
-    // 5) Remove the #DATA snippet from user-facing text
+    // 5) Remove #DATA snippet from user-facing text
     aiResponse = aiResponse.replace(dataRegex, '').trim();
 
     // 6) Check for #FORWARD_TELEGRAM#
     if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
-      // Build summary from the memory
       const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
-
       try {
+        // Build summary from dataObj.memory
         const parsed = JSON.parse(dataObj.memory);
         const summary = `
 Booking Summary:
@@ -564,19 +575,16 @@ Artist: ${parsed.artist || ""}
 Price Range: ${parsed.priceRange || ""}
 Description: ${parsed.description || ""}
 `;
-
         await sendTelegramMessage(summary);
 
-        // Return cleaned text to user
         return res.json({ response: cleanedResponse });
       } catch (err) {
         console.error('Error building Telegram summary:', err);
-        // fallback
         return res.json({ response: aiResponse.replace('#FORWARD_TELEGRAM#', '').trim() });
       }
     }
 
-    // 7) Return final text to user
+    // 7) Return final text
     res.json({ response: aiResponse });
 
   } catch (error) {
@@ -586,7 +594,7 @@ Description: ${parsed.description || ""}
 });
 
 /******************************************************
- * 16) Telegram Test Route (POST /send-telegram)
+ * 17) Telegram Test Route (POST /send-telegram)
  ******************************************************/
 app.post('/send-telegram', (req, res) => {
   const { text } = req.body;
@@ -605,7 +613,7 @@ app.post('/send-telegram', (req, res) => {
 });
 
 /******************************************************
- * 17) Google Sheets Route (GET /artists)
+ * 18) Google Sheets Route (GET /artists)
  ******************************************************/
 app.get('/artists', async (req, res) => {
   try {
@@ -618,7 +626,7 @@ app.get('/artists', async (req, res) => {
 });
 
 /******************************************************
- * 18) Google Calendar Routes
+ * 19) Google Calendar Routes
  ******************************************************/
 // Create a new event (POST /calendar/events)
 app.post('/calendar/events', async (req, res) => {
@@ -648,7 +656,7 @@ app.get('/calendar/events', async (req, res) => {
 });
 
 /******************************************************
- * 19) Start the Server
+ * 20) Start the Server
  ******************************************************/
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
