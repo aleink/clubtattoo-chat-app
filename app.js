@@ -27,6 +27,12 @@ const { Configuration, OpenAIApi } = require('openai');
 // 2.3 Telegram Bot
 const TelegramBot = require('node-telegram-bot-api');
 
+const path = require('path');
+
+// after creating your Express app
+app.use(express.static(path.join(__dirname, 'public')));
+
+
 // 2.4 Google Sheets helper (for artists data)
 const { getArtistsData } = require('./googleSheets');
 
@@ -68,12 +74,6 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 
-/******************************************************
- * Basic Root Route
- ******************************************************/
-app.get('/', (req, res) => {
-  res.send('Hello from Club Tattoo Chat App!');
-});
 
 /******************************************************
  * Image Upload Route
@@ -109,7 +109,7 @@ app.post('/chat', async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: `You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
+          content: You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
 **Club Tattoo Locations**:
 1. **Mesa, AZ** – 1205 W. Broadway Rd, Mesa, AZ 85202 (480) 835-8000
@@ -446,7 +446,7 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - If hesitant, politely help them decide; if not booking, let them go graciously.
 
 
-`
+
         },
         {
           role: 'user',
@@ -536,5 +536,5 @@ app.get('/calendar/events', async (req, res) => {
  * Start the Server
  ******************************************************/
 app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
+  console.log(Server is running on http://localhost:${port});
 });
