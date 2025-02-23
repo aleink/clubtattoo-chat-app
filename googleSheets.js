@@ -1,33 +1,40 @@
-// googleSheets.js
+/******************************************************
+ * googleSheets.js
+ * Reads your Sheets JSON credentials from process.env.GOOGLE_SHEETS_KEY
+ ******************************************************/
+
 const { google } = require('googleapis');
-const path = require('path');
 
-// 1) Path to your JSON key file
-const KEYFILEPATH = path.join(__dirname, 'credentials', 'clubtattoo-sheets-integration-409fbe2294dc.json');
+// 1) Replace with your actual Spreadsheet ID (from the URL in Google Sheets)
+const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE';
 
+// 2) Parse the JSON from the environment variable
+//    Make sure you set GOOGLE_SHEETS_KEY in Render or wherever you're hosting
+const sheetsCredentials = JSON.parse(process.env.GOOGLE_SHEETS_KEY);
 
-// 2) The ID of your spreadsheet (from the URL)
-const SPREADSHEET_ID = '1oHtyupf7EGYiCzavUHf_jlMNZ13_cWb2GLVMkKyPnSI'; // Replace with yours
-
-// 3) Initialize auth
+// 3) Create a GoogleAuth instance with credentials instead of keyFile
 const auth = new google.auth.GoogleAuth({
-  keyFile: KEYFILEPATH,
+  credentials: {
+    private_key: sheetsCredentials.private_key,
+    client_email: sheetsCredentials.client_email,
+  },
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
-// 4) Fetch artists from the "Artists" sheet
+// Example function: read data from the "Artists" tab
 async function getArtistsData() {
-  // Create a client
+  // Get an authorized client
   const client = await auth.getClient();
-  // Create a Google Sheets instance
+  // Create a Sheets instance
   const sheets = google.sheets({ version: 'v4', auth: client });
 
-  // Range: e.g. "Artists!A1:E" if you have columns A-E
+  // Example range: "Artists!A1:E"
+  // Adjust based on your actual sheet name & columns
   const range = 'Artists!A1:E';
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: range,
+    range,
   });
 
   const rows = response.data.values;
@@ -35,20 +42,17 @@ async function getArtistsData() {
     return [];
   }
 
-  // First row might be headers: "Name", "Specialty", etc.
-  const header = rows[0];
-  const dataRows = rows.slice(1); // skip the header row
+  // Skip the header row
+  const dataRows = rows.slice(1);
 
   // Convert each row to an object
-  const artists = dataRows.map((row) => {
-    return {
-      name: row[0],
-      specialty: row[1],
-      location: row[2],
-      schedule: row[3],
-      notes: row[4],
-    };
-  });
+  const artists = dataRows.map((row) => ({
+    name: row[0],
+    specialty: row[1],
+    location: row[2],
+    schedule: row[3],
+    notes: row[4],
+  }));
 
   return artists;
 }
