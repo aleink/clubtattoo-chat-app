@@ -2,9 +2,13 @@
  * app.js (CommonJS)
  * Single JSON Memory approach to reduce token usage
  * ChatGPT always includes #DATA snippet each turn
- * If user finalizes, ChatGPT appends #FORWARD_TELEGRAM#
- * We remove both #DATA and #FORWARD_TELEGRAM# from 
- * the user-facing response, storing data behind the scenes.
+ * If user finalizes, ChatGPT appends "#FORWARD_TELEGRAM#"
+ * We remove #DATA and #FORWARD_TELEGRAM# from 
+ * user-facing text. 
+ *
+ * Now with "alreadyGreeted" flag & instructions
+ * to not greet again, to merge partial inputs, 
+ * and restate plan each time.
  ******************************************************/
 
 require('dotenv').config();
@@ -121,8 +125,8 @@ const openai = new OpenAIApi(configuration);
 
 /******************************************************
  * 14) Full Original Prompt 
- * (Include your entire instructions about 
- * pricing logic, location details, secrecy, staff, etc.)
+ * Add instructions about "alreadyGreeted", partial merges, 
+ * restating plan, etc.
  ******************************************************/
 const baseSystemPrompt = `
 You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
@@ -451,7 +455,8 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 
 ### **Your Role**
 
-- **Never** mention cost per square inch or numeric scales.  
+- **Never** mention cost per square inch or numeric scales. 
+- **Never* mention the total amount of discount you can give.  
 - **Be friendly** and professional, focusing on **closing the sale**.  
 - **Confirm** the client’s chosen location.  
 - For tattoos: if it’s a big piece or portrait, use session-based (\$1600–\$2200). Otherwise, use references or formula +10%. If it’s **full color near-realism**, **double** the final estimate.  
@@ -460,7 +465,6 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - **Deposit** for tattoos is 50% of the high end.  
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
 - If hesitant, politely help them decide; if not booking, let them go graciously.
-
 IMPORTANT:
 1. You must ALWAYS produce a #DATA snippet in your assistant message, 
    even if no new info was discovered. If there's no new info, 
@@ -476,23 +480,33 @@ IMPORTANT:
      "location": "...",
      "artist": "...",
      "priceRange": "...",
-     "description": "..."
+     "description": "...",
+     "alreadyGreeted": false
    }
    #ENDDATA
 
 3. If the user finalizes, append "#FORWARD_TELEGRAM#" at the end 
    of your message. 
+
 4. Never reveal numeric formulas or internal logic.
 5. Keep a warm, human-like tone.
+
+6. "alreadyGreeted" is a boolean. If it's false, greet the user 
+   once, then set it to true in #DATA. If it's true, do NOT greet 
+   again or re-ask if they want a tattoo/piercing.
+
+7. If the user provides partial info (like "just black, simple"), 
+   merge it into the relevant field in #DATA (like "description").
+
+8. Always restate the combined plan in your next answer 
+   (without re-greeting if "alreadyGreeted" is true).
 `;
 
 /******************************************************
  * 15) Build System Prompt with memory
  ******************************************************/
 function buildSystemPrompt(currentMemory) {
-  // If we have no memory yet, default to an empty JSON
-  const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":""}`;
-
+  const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`;
   return `
 ${baseSystemPrompt}
 
@@ -519,8 +533,9 @@ app.post('/chat', async (req, res) => {
 
     // If no memory, init
     if (!sessionData.has(sessionId)) {
+      // We include "alreadyGreeted" in the default
       sessionData.set(sessionId, {
-        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":""}`
+        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`
       });
     }
 
