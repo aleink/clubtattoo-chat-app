@@ -1,11 +1,10 @@
 /******************************************************
  * app.js (CommonJS)
- * Combines:
- * 1) Single JSON memory for big details (#DATA snippet).
- * 2) Rolling window of last 2 user–assistant pairs (4 messages).
- * 
- * If user finalizes, append "#FORWARD_TELEGRAM#",
- * we send a Telegram summary from the memory.
+ * Features:
+ *  - Redirect / to /welcome.html
+ *  - Single JSON memory (#DATA snippet)
+ *  - Rolling window (2 user–assistant pairs)
+ *  - Telegram summary includes date
  ******************************************************/
 
 require('dotenv').config();
@@ -16,39 +15,12 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-/******************************************************
- * 1) sessionData:
- *    - memory: JSON snippet with "alreadyGreeted", etc.
- *    - conversation: array of { role: 'user'|'assistant', content: '...' }
- ******************************************************/
-const sessionData = new Map();
+// If you're using these, uncomment and adjust
+// const { getLocations, getArtists } = require('./googleSheets');
+// const { createEvent, listEvents } = require('./googleCalendar');
 
-/******************************************************
- * 2) Cloudinary + Multer
- ******************************************************/
-const cloudinary = require('cloudinary').v2;
-const multer = require('multer');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-
-/******************************************************
- * 3) OpenAI (GPT-4)
- ******************************************************/
-const { Configuration, OpenAIApi } = require('openai');
-
-/******************************************************
- * 4) Telegram Bot
- ******************************************************/
+// For Telegram
 const TelegramBot = require('node-telegram-bot-api');
-
-/******************************************************
- * 5) Google Sheets & Calendar Helpers
- ******************************************************/
-const { getArtistsData } = require('./googleSheets');
-const { createEvent, listEvents } = require('./googleCalendar');
-
-/******************************************************
- * 6) Telegram Bot Setup
- ******************************************************/
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 const telegramBot = new TelegramBot(telegramToken, { polling: false });
@@ -58,34 +30,39 @@ function sendTelegramMessage(text) {
 }
 
 /******************************************************
- * 7) Express & Static
+ * 1) sessionData map:
+ *    memory: JSON snippet (with "date" field)
+ *    conversation: rolling window
  ******************************************************/
-app.use(express.static(path.join(__dirname, 'public')));
+const sessionData = new Map();
 
 /******************************************************
- * 8) Cookie Parser & JSON
+ * 2) Express & Middleware
  ******************************************************/
+app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 app.use(cookieParser());
 app.use(express.json());
 
 /******************************************************
- * 9) Session ID Middleware
+ * 3) Redirect root (/) to /welcome.html
  ******************************************************/
-app.use((req, res, next) => {
-  if (!req.cookies.sessionId) {
-    const newId = uuidv4();
-    res.cookie('sessionId', newId, { httpOnly: true });
-  }
-  next();
+app.get('/', (req, res) => {
+  res.redirect('/welcome.html');
 });
 
 /******************************************************
- * 10) Cloudinary Config
+ * 4) Cloudinary + Multer, if needed
  ******************************************************/
+// [Your existing cloudinary + multer config if you want /upload endpoint]
+/*
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
 cloudinary.config({
-  cloud_name: 'dbqmkwkga',
-  api_key: '857572131317818',
-  api_secret: 'j6_kZeCiVlj9PTBz5Q4h7DNRBSc'
+  cloud_name: '...',
+  api_key: '...',
+  api_secret: '...'
 });
 
 const storage = new CloudinaryStorage({
@@ -97,36 +74,21 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 
-/******************************************************
- * 11) Root Route (Serve index.html)
- ******************************************************/
-// app.get('/', (req, res) => {
-//   res.send('Hello from Club Tattoo Chat App!');
-// });
-
-/******************************************************
- * 12) Image Upload Route (POST /upload)
- ******************************************************/
+// Example /upload route:
 app.post('/upload', upload.single('image'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided' });
   }
   res.json({ imageUrl: req.file.path });
 });
+*/
 
 /******************************************************
- * 13) OpenAI Config (GPT-4)
+ * 5) The main Chat Endpoint: /chat
+ *    Single JSON memory + rolling window
  ******************************************************/
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-const openai = new OpenAIApi(configuration);
 
-/******************************************************
- * 14) Full Original Prompt 
- *   (Include your entire instructions about 
- *    behind-the-scenes logic, staff, etc.)
- ******************************************************/
+// This is your main system prompt with instructions
 const baseSystemPrompt = `
 You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
@@ -194,7 +156,7 @@ You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and pi
 
 11. **Collect Client Info, Preferred Date/Time, and Forward to Associate**  
     - Once you’ve **agreed on price** and the client wants to set an appointment (tattoo or piercing), ask for their **full name, email, phone number**, and **preferred date/time**.  
-    - For tattoos, let them know the **deposit** is **50% of the high end** of the agreed range to lock the day and artist.  
+    - For tattoos, let them know the **deposit** is **50% of the high end** of the agreed range to lock the day and artist, make sure to let the client know that the deposit is not refundable.  
     - For piercings, typically no deposit unless the shop policy says otherwise.  
     - Inform them you’ll **forward all details** (including any photo references) to an associate, who will **collect any deposit** (for tattoos) and **finalize the appointment** in the calendar.
 
@@ -464,52 +426,18 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - If hesitant, politely help them decide; if not booking, let them go graciously.
 
 
-
 IMPORTANT:
 1. You must ALWAYS produce a #DATA snippet in your assistant message, 
-   even if no new info was discovered. If there's no new info, 
-   repeat the existing data. If you fail to do so, the conversation 
-   memory is lost, so do not omit it.
-
-2. The #DATA snippet looks like:
-   #DATA:
-   {
-     "name": "...",
-     "email": "...",
-     "phone": "...",
-     "location": "...",
-     "artist": "...",
-     "priceRange": "...",
-     "description": "...",
-     "alreadyGreeted": false
-   }
-   #ENDDATA
-
-3. If the user finalizes, append "#FORWARD_TELEGRAM#" at the end 
-   of your message. 
-
-4. Never reveal numeric formulas or internal logic.
-5. Keep a warm, human-like tone.
-
-6. "alreadyGreeted" is a boolean. If it's false, greet the user 
-   once, then set it to true in #DATA. If it's true, do NOT greet 
-   again or re-ask if they want a tattoo/piercing.
-
-7. If the user provides partial info (like "just black, simple"), 
-   merge it into the relevant field in #DATA (like "description").
-
-8. Always restate the combined plan in your next answer 
-   (without re-greeting if "alreadyGreeted" is true)..
-
-
+   even if no new info. If there's no new info, repeat the existing data. 
+2. If user finalizes, append "#FORWARD_TELEGRAM#" 
+3. Track "date" in the snippet for the appointment date/time
+4. "alreadyGreeted" = false => greet once, then set true
+5. ...
 `;
 
-/******************************************************
- * 15) Build System Prompt with memory
- ******************************************************/
+// Helper to build the system prompt with memory
 function buildSystemPrompt(currentMemory) {
-  // If we have no memory, use default
-  const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`;
+  const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","date":"","alreadyGreeted":false}`;
   return `
 ${baseSystemPrompt}
 
@@ -518,10 +446,6 @@ ${safeMemory}
 `;
 }
 
-/******************************************************
- * 16) Chat Route (POST /chat)
- * Single JSON memory + Rolling window (2 user–assistant pairs)
- ******************************************************/
 app.post('/chat', async (req, res) => {
   try {
     const userMessage = req.body.message;
@@ -529,16 +453,18 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No message provided' });
     }
 
-    const sessionId = req.cookies.sessionId;
+    // Session ID
+    let sessionId = req.cookies.sessionId;
     if (!sessionId) {
-      return res.status(400).json({ error: 'No sessionId cookie found' });
+      sessionId = uuidv4();
+      res.cookie('sessionId', sessionId, { httpOnly: true });
     }
 
-    // If no session record, init
+    // If no session data, init
     if (!sessionData.has(sessionId)) {
       sessionData.set(sessionId, {
-        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","alreadyGreeted":false}`,
-        conversation: [] // will store { role: 'user'|'assistant', content: '...' }
+        memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","date":"","alreadyGreeted":false}`,
+        conversation: []
       });
     }
 
@@ -546,34 +472,37 @@ app.post('/chat', async (req, res) => {
     const currentMemory = dataObj.memory;
     const conversation = dataObj.conversation;
 
-    // 1) Add user's message to conversation
+    // 1) Add user message
     conversation.push({ role: 'user', content: userMessage });
 
-    // 2) Keep only last 4 messages (2 user–assistant pairs)
+    // 2) Trim to last 4 messages (2 user–assistant pairs)
     while (conversation.length > 4) {
       conversation.shift();
     }
 
-    // 3) Build system prompt with memory
+    // 3) Build system prompt
     const systemPrompt = buildSystemPrompt(currentMemory);
 
-    // 4) finalMessages: system + the short conversation
+    // 4) finalMessages = system + short conversation
     const finalMessages = [
       { role: 'system', content: systemPrompt },
       ...conversation
     ];
 
-    // 5) Call GPT-4
+    // 5) Call OpenAI
+    const { Configuration, OpenAIApi } = require('openai');
+    const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = new OpenAIApi(configuration);
+
     const completion = await openai.createChatCompletion({
       model: 'gpt-4',
       messages: finalMessages
     });
+
     let aiResponse = completion.data.choices[0].message.content;
 
-    // 6) Add assistant reply to conversation
+    // 6) Add assistant reply
     conversation.push({ role: 'assistant', content: aiResponse });
-
-    // Trim again if needed
     while (conversation.length > 4) {
       conversation.shift();
     }
@@ -584,21 +513,19 @@ app.post('/chat', async (req, res) => {
     if (match) {
       const jsonStr = match[1];
       try {
-        // Update memory
-        dataObj.memory = jsonStr;
+        dataObj.memory = jsonStr; // update memory
       } catch (err) {
         console.error('Error parsing #DATA JSON:', err);
       }
     }
 
-    // Remove the #DATA snippet from user-facing text
+    // remove #DATA from user-facing text
     aiResponse = aiResponse.replace(dataRegex, '').trim();
 
     // 8) Check for #FORWARD_TELEGRAM#
     if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
       const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
       try {
-        // Build summary from dataObj.memory
         const parsed = JSON.parse(dataObj.memory);
         const summary = `
 Booking Summary:
@@ -609,7 +536,9 @@ Location: ${parsed.location || ""}
 Artist: ${parsed.artist || ""}
 Price Range: ${parsed.priceRange || ""}
 Description: ${parsed.description || ""}
+Appointment Date: ${parsed.date || "(not specified)"}
 `;
+
         await sendTelegramMessage(summary);
 
         return res.json({ response: cleanedResponse });
@@ -619,9 +548,8 @@ Description: ${parsed.description || ""}
       }
     }
 
-    // 9) Return final text to user
+    // 9) Return final text
     res.json({ response: aiResponse });
-
   } catch (error) {
     console.error('Error with OpenAI API:', error);
     res.status(500).json({ error: 'Failed to get response from OpenAI' });
@@ -629,69 +557,7 @@ Description: ${parsed.description || ""}
 });
 
 /******************************************************
- * 17) Telegram Test Route (POST /send-telegram)
- ******************************************************/
-app.post('/send-telegram', (req, res) => {
-  const { text } = req.body;
-  if (!text) {
-    return res.status(400).json({ error: 'text is required' });
-  }
-
-  sendTelegramMessage(text)
-    .then(() => {
-      res.json({ success: true, message: 'Message sent to Telegram!' });
-    })
-    .catch((err) => {
-      console.error('Error sending Telegram message:', err);
-      res.status(500).json({ error: 'Failed to send Telegram message' });
-    });
-});
-
-/******************************************************
- * 18) Google Sheets Route (GET /artists)
- ******************************************************/
-app.get('/artists', async (req, res) => {
-  try {
-    const artists = await getArtistsData();
-    res.json({ artists });
-  } catch (error) {
-    console.error('Error reading Google Sheets:', error);
-    res.status(500).json({ error: 'Failed to fetch artists data' });
-  }
-});
-
-/******************************************************
- * 19) Google Calendar Routes
- ******************************************************/
-// Create a new event (POST /calendar/events)
-app.post('/calendar/events', async (req, res) => {
-  try {
-    const { summary, description, startTime, endTime } = req.body;
-    if (!summary || !startTime || !endTime) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const event = await createEvent({ summary, description, startTime, endTime });
-    res.json({ success: true, event });
-  } catch (error) {
-    console.error('Error creating event:', error);
-    res.status(500).json({ error: 'Failed to create event' });
-  }
-});
-
-// List upcoming events (GET /calendar/events)
-app.get('/calendar/events', async (req, res) => {
-  try {
-    const events = await listEvents();
-    res.json({ events });
-  } catch (error) {
-    console.error('Error listing events:', error);
-    res.status(500).json({ error: 'Failed to list events' });
-  }
-});
-
-/******************************************************
- * 20) Start the Server
+ * 21) Start the Server
  ******************************************************/
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
