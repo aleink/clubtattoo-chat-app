@@ -16,6 +16,8 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
+const agentId = process.env.AGENT_ID;
+
 
 // If using Telegram
 const TelegramBot = require('node-telegram-bot-api');
