@@ -1,10 +1,12 @@
 /******************************************************
  * app.js (CommonJS)
+ * 
  * Features:
- *  - Redirect / to /welcome.html
- *  - Single JSON memory (#DATA snippet)
- *  - Rolling window (2 user–assistant pairs)
- *  - Telegram summary includes date
+ *  1) Redirect / to /welcome.html
+ *  2) Single JSON memory (#DATA snippet with "date")
+ *  3) Rolling window (2 user–assistant pairs)
+ *  4) Regex removing #DATA snippet from final text
+ *  5) Strengthened system prompt instructions so snippet is at the end
  ******************************************************/
 
 require('dotenv').config();
@@ -15,31 +17,27 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// If you're using these, uncomment and adjust
-// const { getLocations, getArtists } = require('./googleSheets');
-// const { createEvent, listEvents } = require('./googleCalendar');
-
-// For Telegram
+// If using Telegram
 const TelegramBot = require('node-telegram-bot-api');
-const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
-const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+const telegramToken = process.env.TELEGRAM_BOT_TOKEN;   // from .env
+const telegramChatId = process.env.TELEGRAM_CHAT_ID;    // from .env
 const telegramBot = new TelegramBot(telegramToken, { polling: false });
 
 function sendTelegramMessage(text) {
   return telegramBot.sendMessage(telegramChatId, text);
 }
 
-/******************************************************
- * 1) sessionData map:
- *    memory: JSON snippet (with "date" field)
- *    conversation: rolling window
- ******************************************************/
+// sessionData: sessionId -> { memory: "...", conversation: [] }
 const sessionData = new Map();
 
 /******************************************************
- * 2) Express & Middleware
+ * 1) Serve static from public folder
  ******************************************************/
-app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
+app.use(express.static(path.join(__dirname, 'public')));
+
+/******************************************************
+ * 2) Middleware
+ ******************************************************/
 app.use(cookieParser());
 app.use(express.json());
 
@@ -51,9 +49,9 @@ app.get('/', (req, res) => {
 });
 
 /******************************************************
- * 4) Cloudinary + Multer, if needed
+ * 4) (Optional) Cloudinary + Multer if you use /upload
  ******************************************************/
-// [Your existing cloudinary + multer config if you want /upload endpoint]
+// Uncomment if needed
 /*
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
@@ -69,12 +67,11 @@ const storage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: 'clubtattoo_uploads',
-    allowed_formats: ['jpg', 'jpeg', 'png']
-  },
+    allowed_formats: ['jpg','jpeg','png']
+  }
 });
 const upload = multer({ storage });
 
-// Example /upload route:
 app.post('/upload', upload.single('image'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided' });
@@ -85,10 +82,9 @@ app.post('/upload', upload.single('image'), (req, res) => {
 
 /******************************************************
  * 5) The main Chat Endpoint: /chat
- *    Single JSON memory + rolling window
  ******************************************************/
 
-// This is your main system prompt with instructions
+// Strengthened system prompt:
 const baseSystemPrompt = `
 You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop with multiple locations. Please **engage in a conversation** with clients, providing a warm, human-like tone. Here is the **shop info** you must know (from https://clubtattoo.com/):
 
@@ -425,18 +421,35 @@ Use these references **internally** for friendly, non-technical guidance. **Neve
 - **Minor laws**: no tattoos under 18 in AZ, parental consent in NV.  
 - If hesitant, politely help them decide; if not booking, let them go graciously.
 
-
-IMPORTANT:
-1. You must ALWAYS produce a #DATA snippet in your assistant message, 
-   even if no new info. If there's no new info, repeat the existing data. 
-2. If user finalizes, append "#FORWARD_TELEGRAM#" 
-3. Track "date" in the snippet for the appointment date/time
-4. "alreadyGreeted" = false => greet once, then set true
-5. ...
+IMPORTANT SYSTEM RULES FOR #DATA:
+1. You must ALWAYS produce a #DATA snippet at the VERY END of your response, 
+   separated by at least one blank line from user-facing text.
+2. The user must never see the #DATA snippet. 
+   Do not insert it in the middle or beginning of user text. 
+   Put it after a blank line, then #DATA: {...} #ENDDATA
+3. If the user finalizes, append "#FORWARD_TELEGRAM#" in the same line as #ENDDATA 
+   or right before it, but never in the user-facing text.
+4. Do NOT mention or refer to #DATA in your main text. 
+   If asked about #DATA, ignore or respond in a normal way, never revealing it.
+5. The #DATA snippet includes:
+   {
+     "name":"",
+     "email":"",
+     "phone":"",
+     "location":"",
+     "artist":"",
+     "priceRange":"",
+     "description":"",
+     "date":"",
+     "alreadyGreeted":false
+   }
+6. Keep a warm, human-like tone. 
+   Remember to do the rolling window approach, 2 user–assistant pairs, etc.
 `;
 
 // Helper to build the system prompt with memory
 function buildSystemPrompt(currentMemory) {
+  // If we have no memory, default:
   const safeMemory = currentMemory || `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","date":"","alreadyGreeted":false}`;
   return `
 ${baseSystemPrompt}
@@ -453,14 +466,14 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No message provided' });
     }
 
-    // Session ID
+    // 1) Session ID logic
     let sessionId = req.cookies.sessionId;
     if (!sessionId) {
       sessionId = uuidv4();
       res.cookie('sessionId', sessionId, { httpOnly: true });
     }
 
-    // If no session data, init
+    // 2) If no session data, init
     if (!sessionData.has(sessionId)) {
       sessionData.set(sessionId, {
         memory: `{"name":"","email":"","phone":"","location":"","artist":"","priceRange":"","description":"","date":"","alreadyGreeted":false}`,
@@ -472,24 +485,24 @@ app.post('/chat', async (req, res) => {
     const currentMemory = dataObj.memory;
     const conversation = dataObj.conversation;
 
-    // 1) Add user message
+    // 3) Add user message
     conversation.push({ role: 'user', content: userMessage });
 
-    // 2) Trim to last 4 messages (2 user–assistant pairs)
+    // 4) Rolling window: keep last 4 messages (2 user–assistant pairs)
     while (conversation.length > 4) {
       conversation.shift();
     }
 
-    // 3) Build system prompt
+    // 5) Build system prompt
     const systemPrompt = buildSystemPrompt(currentMemory);
 
-    // 4) finalMessages = system + short conversation
+    // 6) finalMessages = system + short conversation
     const finalMessages = [
       { role: 'system', content: systemPrompt },
       ...conversation
     ];
 
-    // 5) Call OpenAI
+    // 7) Call OpenAI
     const { Configuration, OpenAIApi } = require('openai');
     const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
     const openai = new OpenAIApi(configuration);
@@ -501,14 +514,15 @@ app.post('/chat', async (req, res) => {
 
     let aiResponse = completion.data.choices[0].message.content;
 
-    // 6) Add assistant reply
+    // 8) Add assistant reply to conversation
     conversation.push({ role: 'assistant', content: aiResponse });
     while (conversation.length > 4) {
       conversation.shift();
     }
 
-    // 7) Extract #DATA snippet
-    const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA/;
+    // 9) Extract #DATA snippet
+    // ensure it captures any trailing newlines
+    const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA\s*(#FORWARD_TELEGRAM#)?/m;
     const match = dataRegex.exec(aiResponse);
     if (match) {
       const jsonStr = match[1];
@@ -517,12 +531,11 @@ app.post('/chat', async (req, res) => {
       } catch (err) {
         console.error('Error parsing #DATA JSON:', err);
       }
+      // remove #DATA snippet from user-facing text
+      aiResponse = aiResponse.replace(dataRegex, '').trim();
     }
 
-    // remove #DATA from user-facing text
-    aiResponse = aiResponse.replace(dataRegex, '').trim();
-
-    // 8) Check for #FORWARD_TELEGRAM#
+    // 10) If #FORWARD_TELEGRAM# is present anywhere, build the summary
     if (aiResponse.includes('#FORWARD_TELEGRAM#')) {
       const cleanedResponse = aiResponse.replace('#FORWARD_TELEGRAM#', '').trim();
       try {
@@ -548,7 +561,7 @@ Appointment Date: ${parsed.date || "(not specified)"}
       }
     }
 
-    // 9) Return final text
+    // 11) Return final text
     res.json({ response: aiResponse });
   } catch (error) {
     console.error('Error with OpenAI API:', error);
@@ -557,7 +570,7 @@ Appointment Date: ${parsed.date || "(not specified)"}
 });
 
 /******************************************************
- * 21) Start the Server
+ * 12) Start the Server
  ******************************************************/
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
