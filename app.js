@@ -16,13 +16,12 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
-const agentId = process.env.AGENT_ID;
-
+const agentId = process.env.AGENT_ID || 'asst_5UvKTAVmjYMZAK7jsWxXcyNV';
 
 // If using Telegram
 const TelegramBot = require('node-telegram-bot-api');
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;   // from .env
-const telegramChatId = process.env.TELEGRAM_CHAT_ID;    // from .env
+const telegramChatId = process.env.TELEGRAM_CHAT_ID;      // from .env
 const telegramBot = new TelegramBot(telegramToken, { polling: false });
 
 function sendTelegramMessage(text) {
@@ -88,7 +87,6 @@ app.post('/upload', upload.single('image'), (req, res) => {
 
 // Strengthened system prompt:
 const baseSystemPrompt = `
-You are a booking manager named “Aitana” at **Club Tattoo**, a tattoo and piercing shop 
 `;
 
 // Helper to build the system prompt with memory
@@ -146,17 +144,45 @@ app.post('/chat', async (req, res) => {
       ...conversation
     ];
 
-    // 7) Call OpenAI
+    // 7) Call OpenAI using the Assistants API endpoints:
     const { Configuration, OpenAIApi } = require('openai');
     const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
     const openai = new OpenAIApi(configuration);
 
-    const completion = await openai.createChatCompletion({
-      model: 'gpt-4',
-      messages: finalMessages
+    // Create a new thread with your messages
+    const threadResponse = await openai.request({
+      method: 'POST',
+      url: '/v1/threads',
+      headers: {
+        'OpenAI-Beta': 'assistants=v2'
+      },
+      data: { messages: finalMessages }
     });
+    const threadId = threadResponse.data.id;
 
-    let aiResponse = completion.data.choices[0].message.content;
+    // Trigger a run using your specific assistant ID
+    const runResponse = await openai.request({
+      method: 'POST',
+      url: `/v1/threads/${threadId}/runs`,
+      headers: {
+        'OpenAI-Beta': 'assistants=v2'
+      },
+      data: { assistant_id: agentId }
+    });
+    // Optionally, you can check runResponse.data for status or run_id
+
+    // Retrieve thread messages to get the assistant’s reply
+    const messagesResponse = await openai.request({
+      method: 'GET',
+      url: `/v1/threads/${threadId}/messages`,
+      headers: {
+        'OpenAI-Beta': 'assistants=v2'
+      }
+    });
+    const messages = messagesResponse.data.data;
+    // Find the most recent assistant message
+    const assistantMessage = messages.reverse().find(msg => msg.role === 'assistant');
+    let aiResponse = assistantMessage ? assistantMessage.content : "No response from assistant.";
 
     // 8) Add assistant reply to conversation
     conversation.push({ role: 'assistant', content: aiResponse });
@@ -165,7 +191,6 @@ app.post('/chat', async (req, res) => {
     }
 
     // 9) Extract #DATA snippet
-    // ensure it captures any trailing newlines
     const dataRegex = /#DATA:\s*({[\s\S]*?})\s*#ENDDATA\s*(#FORWARD_TELEGRAM#)?/m;
     const match = dataRegex.exec(aiResponse);
     if (match) {
@@ -195,9 +220,7 @@ Price Range: ${parsed.priceRange || ""}
 Description: ${parsed.description || ""}
 Appointment Date: ${parsed.date || "(not specified)"}
 `;
-
         await sendTelegramMessage(summary);
-
         return res.json({ response: cleanedResponse });
       } catch (err) {
         console.error('Error building Telegram summary:', err);
